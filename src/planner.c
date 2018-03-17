@@ -22,6 +22,9 @@
 #include "planner_utils.h"
 #include "hypertable_insert.h"
 #include "constraint_aware_append.h"
+#include "space_partition_exclude.h"
+#include "chunk.h"
+#include "hypercube.h"
 
 void		_planner_init(void);
 void		_planner_fini(void);
@@ -262,16 +265,37 @@ timescaledb_set_rel_pathlist(PlannerInfo *root,
 	else if (ht != NULL && is_append_child(rel, rte))
 	{
 		/* Otherwise, apply only to hypertables */
-
 		/*
-		 * When applying to hypertables, apply when you get the first append
-		 * relation child (indicated by RELOPT_OTHER_MEMBER_REL) which is the
-		 * main table. Then apply to all other children of that hypertable. We
-		 * can't wait to get the parent of the append relation b/c by that
-		 * time it's too late.
+		 * This is the case where we find the main table as a child of the
+		 * append relation. The order of execution of this function is:
+		 * main_table as child, chunks, main_table as parent because of the
+		 * way the recursion in the planner works.
 		 */
 		ListCell   *l;
 
+		/*
+		 * Exclude the chunks by space partition if you see column = value in
+		 * the qual (baserestrictinfo).
+		 */
+		foreach(l, rel->baserestrictinfo)
+		{
+			RestrictInfo *re = lfirst(l);
+			SpacePartitionExclude *spe = space_partition_exclude_get(re, root->parse, ht);
+
+			if (NULL != spe)
+			{
+				space_partition_exclude_apply(spe, root, ht, rti);
+			}
+		}
+
+		/*
+		 * Apply the sort_transform_optimization which makes the planner
+		 * understand that certain functions (e.g. date_trunc, time_bucket)
+		 * preserve order in such ways that indexes on the plain column can be
+		 * reused. Note: do the transform on the chunks before they are
+		 * processed in the usual way. Thus, do the transform when you see the
+		 * main_table_child and before you see the chunks.
+		 */
 		foreach(l, root->append_rel_list)
 		{
 			AppendRelInfo *appinfo = (AppendRelInfo *) lfirst(l);
